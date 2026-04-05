@@ -1,0 +1,5 @@
+streamlit
+streamlit-webrtc
+mediapipe
+tensorflow
+av
