@@ -3,22 +3,28 @@ import numpy as np
 import cv2
 import av
 import mediapipe as mp
-import tensorflow as tf
 
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
+import tflite_runtime.interpreter as tflite
+
 # ---------------------------
-# LOAD MODEL + LABELS
+# LOAD TFLITE MODEL
 # ---------------------------
-model = tf.keras.models.load_model("sign_language_model.keras")
+interpreter = tflite.Interpreter(model_path="sign_language_model.tflite")
+interpreter.allocate_tensors()
+
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
 actions = np.load("actions.npy")
 
 SEQUENCE_LENGTH = 30
 
 # ---------------------------
-# LOAD MEDIAPIPE (IMAGE MODE)
+# LOAD MEDIAPIPE
 # ---------------------------
 pose_detector = vision.PoseLandmarker.create_from_options(
     vision.PoseLandmarkerOptions(
@@ -57,6 +63,7 @@ def extract_keypoints(pose_result, hand_result):
 
     return np.concatenate([pose, left_hand, right_hand])
 
+
 def extract_keypoints_from_frame(frame):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -67,12 +74,23 @@ def extract_keypoints_from_frame(frame):
     return extract_keypoints(pose_result, hand_result)
 
 # ---------------------------
+# TFLITE PREDICTION FUNCTION
+# ---------------------------
+def tflite_predict(sequence):
+    input_data = np.expand_dims(sequence, axis=0).astype(np.float32)
+
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+    interpreter.invoke()
+
+    output = interpreter.get_tensor(output_details[0]['index'])[0]
+    return output
+
+# ---------------------------
 # VIDEO PROCESSOR
 # ---------------------------
 class SignLanguageProcessor(VideoProcessorBase):
     def __init__(self):
         self.sequence = []
-        self.predictions = []
         self.label = "Starting..."
 
     def recv(self, frame):
@@ -84,21 +102,16 @@ class SignLanguageProcessor(VideoProcessorBase):
         self.sequence = self.sequence[-SEQUENCE_LENGTH:]
 
         if len(self.sequence) == SEQUENCE_LENGTH:
-            input_data = np.expand_dims(self.sequence, axis=0)
+            res = tflite_predict(self.sequence)
 
-            res = model.predict(input_data, verbose=0)[0]
             pred_class = np.argmax(res)
             confidence = np.max(res)
-
-            self.predictions.append(pred_class)
-            self.predictions = self.predictions[-5:]
 
             if confidence > 0.6:
                 self.label = f"{actions[pred_class]} ({confidence:.2f})"
             else:
                 self.label = "Uncertain"
 
-        # Display prediction
         cv2.putText(img, self.label,
                     (10, 40),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -109,7 +122,7 @@ class SignLanguageProcessor(VideoProcessorBase):
 # ---------------------------
 # STREAMLIT UI
 # ---------------------------
-st.title("🤟 Real-Time Sign Language Interpreter")
+st.title("🤟 Real-Time Sign Language Interpreter (TFLite)")
 
 webrtc_streamer(
     key="sign-language",
